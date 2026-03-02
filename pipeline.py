@@ -85,11 +85,43 @@ def transform_data(df):
     # Drop the separate columns
     df_clean.drop(columns=['phone_root', 'phone_suffixes'], inplace=True)
 
+    # Collapse languages into a list
+    lang_cols = [col for col in df_clean.columns if col.startswith('languages.')]
+    df_clean['languages'] = df_clean[lang_cols].apply(
+        lambda row: [v for v in row.dropna().values.tolist()], axis=1
+    )
+    df_clean.drop(columns=lang_cols, inplace=True)
+
+    # Collapse currencies into a list of dicts
+    currency_codes = set(col.split('.')[1] for col in df_clean.columns if col.startswith('currencies.'))
+
+    def extract_currencies(row):
+        result = []
+        for code in currency_codes:
+            name_col = f'currencies.{code}.name'
+            symbol_col = f'currencies.{code}.symbol'
+            if name_col in row and pd.notna(row[name_col]):
+                result.append({'code': code, 'name': row[name_col], 'symbol': row.get(symbol_col)})
+        return result
+
+    currency_cols = [col for col in df_clean.columns if col.startswith('currencies.')]
+    df_clean['currencies'] = df_clean.apply(extract_currencies, axis=1)
+    df_clean.drop(columns=currency_cols, inplace=True)
+
+    # Collapse gini into a single dict
+    gini_cols = [col for col in df_clean.columns if col.startswith('gini.')]
+    df_clean['gini'] = df_clean[gini_cols].apply(
+        lambda row: {col.split('.')[1]: v for col, v in row.items() if pd.notna(v)}, axis=1
+    )
+    df_clean.drop(columns=gini_cols, inplace=True)
+
     # Reset index
     df_clean.reset_index(drop=True, inplace=True)
 
     print(f"Cleaned DataFrame: {df_clean.shape[0]} countries, {df_clean.shape[1]} columns")
     return df_clean
+
+# Cargar datos a mongo, se añadió un upsert porque duplicaba datos en cada run.
 
 @task
 def load_to_mongodb(df_clean):
@@ -98,9 +130,14 @@ def load_to_mongodb(df_clean):
     collection = db[COLLECTION_NAME]
 
     records = df_clean.to_dict('records')
-    collection.insert_many(records)
+    for record in records:
+        collection.update_one(
+            {"code": record["code"]},
+            {"$set": record},
+            upsert=True
+        )
 
-    print(f"Inserted {len(records)} documents into MongoDB")
+    print(f"Upserted {len(records)} documents into MongoDB")
     client.close()
 
 @flow(name="africa_pipeline")
